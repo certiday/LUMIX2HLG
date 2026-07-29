@@ -1,14 +1,15 @@
 # Lumix RAW to HLG
 
-Convert Panasonic Lumix RW2 RAW files and V-Log/V-Gamut stills into HDR **HEIC**, **JPEG XL**, or both.
+Convert Panasonic Lumix RW2 RAW files, Olympus / OM System ORF RAW files, and Panasonic V-Log/V-Gamut stills into HDR **HEIC**, **JPEG XL**, or both.
 
 This is a batch-ready, cross-platform command-line tool for creating BT.2100 HLG / BT.2020 HDR photos without Lightroom or other commercial RAW editors.
 
-> **Status:** Experimental. RW2 development uses LibRaw via rawpy, so its rendering will not exactly match Panasonic’s in-camera JPEGs, macOS Preview, or Lightroom.
+> **Status:** Experimental. RAW development uses LibRaw via rawpy, so rendering will not exactly match Panasonic or Olympus in-camera JPEGs, macOS Preview, Olympus Workspace, Lightroom, or other proprietary RAW processors.
 
 ## Features
 
-- Converts Panasonic `.RW2` RAW files
+- Converts Panasonic Lumix `.RW2` RAW files
+- Converts Olympus / OM System `.ORF` RAW files
 - Converts V-Log / V-Gamut rendered `.jpg`, `.jpeg`, `.png`, `.tif`, and `.tiff` images
 - Creates HDR output in:
   - **HEIC** — 10-bit HLG / BT.2020 with HDR metadata
@@ -17,11 +18,12 @@ This is a batch-ready, cross-platform command-line tool for creating BT.2100 HLG
 - Batch-processes multiple files or a folder
 - Supports exposure, highlight roll-off, contrast, and saturation adjustments
 - Runs on macOS, Linux, and Windows
+- Uses temporary intermediate files only; no TIFF output is retained
 
 ## Requirements
 
 - Python 3.10 or newer
-- Python packages in `requirements.txt`
+- Python packages listed in `requirements.txt`
 - `heif-enc` for HEIC output
 - `cjxl` for JPEG XL output
 
@@ -92,7 +94,7 @@ cjxl --version
 
 ### Windows
 
-The recommended Windows approach is Miniforge because it can install Python and image-codec dependencies in one isolated environment.
+The recommended Windows approach is Miniforge because it installs Python and image-codec dependencies in one isolated environment.
 
 1. Install [Miniforge](https://github.com/conda-forge/miniforge).
 2. Open **Miniforge Prompt**.
@@ -126,7 +128,7 @@ If `heif-enc` is unavailable or cannot encode HEIC on your Windows installation,
 python LUMIX2HLG.py P1000000.RW2 --format jxl
 ```
 
-## Python dependencies
+## Python Dependencies
 
 Create `requirements.txt` with:
 
@@ -139,7 +141,7 @@ tifffile>=2024.1
 
 ## Usage
 
-### Convert one RW2 file
+### Convert One RW2 File
 
 Create both HEIC and JPEG XL outputs:
 
@@ -155,59 +157,67 @@ HLG_exports/
 └── P1000000_BT2100_HLG.jxl
 ```
 
-### HEIC only
+### Convert One ORF File
+
+Create both outputs from an Olympus or OM System RAW file:
+
+```bash
+python LUMIX2HLG.py OM1_0001.ORF
+```
+
+### HEIC Only
 
 ```bash
 python LUMIX2HLG.py P1000000.RW2 --format heic
 ```
 
-### JPEG XL only
+### JPEG XL Only
 
 ```bash
-python LUMIX2HLG.py P1000000.RW2 --format jxl
+python LUMIX2HLG.py OM1_0001.ORF --format jxl
 ```
 
-### Convert a V-Log still
+### Convert a V-Log Still
 
-Use a V-Log/V-Gamut rendered photo, not a normal Rec.709 or sRGB JPEG:
+Use an image rendered with Panasonic **V-Log / V-Gamut**. Do not use a normal Rec.709 or sRGB JPEG.
 
 ```bash
 python LUMIX2HLG.py P1000000_VLOG.jpg --format heic
 ```
 
-### Batch conversion
+### Batch Conversion
 
-Pass several files:
+Pass several RAW files:
 
 ```bash
-python LUMIX2HLG.py P1000000.RW2 P1060918.RW2 P1060919.RW2
+python LUMIX2HLG.py P1000000.RW2 OM1_0001.ORF P1000001.RW2
 ```
 
-Use a shell wildcard:
+Use shell wildcards:
 
 ```bash
-python LUMIX2HLG.py *.RW2 --format both
+python LUMIX2HLG.py *.RW2 *.ORF --format both
 ```
 
 Process all supported images in one folder:
 
 ```bash
-python LUMIX2HLG.py "/path/to/Lumix photos" --format both
+python LUMIX2HLG.py "/path/to/photos" --format both
 ```
 
 > Folder scans are non-recursive: files in subfolders are not included.
 
-### Set the output folder
+### Set an Output Folder
 
 ```bash
-python LUMIX2HLG.py *.RW2 \
+python LUMIX2HLG.py *.RW2 *.ORF \
   --format both \
   --output-dir HDR_exports
 ```
 
-### Bright HDR scenes
+### Bright HDR Scenes
 
-Reduce exposure and add highlight roll-off for bright skies, reflections, or windows:
+Reduce exposure and apply highlight roll-off for bright skies, reflections, or windows:
 
 ```bash
 python LUMIX2HLG.py P1000000.RW2 \
@@ -216,12 +226,12 @@ python LUMIX2HLG.py P1000000.RW2 \
   --rolloff 0.35
 ```
 
-### Replace existing outputs
+### Replace Existing Outputs
 
-The tool will not overwrite an existing file unless explicitly asked:
+The tool does not overwrite existing files unless explicitly asked:
 
 ```bash
-python LUMIX2HLG.py *.RW2 --format both --overwrite
+python LUMIX2HLG.py *.RW2 *.ORF --format both --overwrite
 ```
 
 ## Options
@@ -244,11 +254,11 @@ View all options:
 python LUMIX2HLG.py --help
 ```
 
-## Input handling
+## Input Handling
 
-### RW2 RAW
+### RW2 and ORF RAW
 
-RW2 files are developed with `rawpy`/LibRaw using:
+Panasonic RW2 and Olympus / OM System ORF files are developed through `rawpy`/LibRaw using:
 
 - Camera white balance
 - 16-bit output
@@ -256,9 +266,9 @@ RW2 files are developed with `rawpy`/LibRaw using:
 - Disabled automatic brightness
 - Highlight blending
 
-RW2 sensor data is not V-Log, so it follows a separate RAW-development path before conversion to BT.2020 and HLG.
+RAW sensor data is not V-Log. RW2 and ORF files therefore use a separate RAW-development path before conversion to BT.2020 and HLG.
 
-### V-Log stills
+### V-Log Stills
 
 For JPG, PNG, and TIFF inputs, the program assumes pixel values are already encoded as:
 
@@ -267,7 +277,7 @@ For JPG, PNG, and TIFF inputs, the program assumes pixel values are already enco
 
 Do not use ordinary sRGB, Rec.709, or standard-camera-profile JPEGs as V-Log input.
 
-## Output compatibility
+## Output Compatibility
 
 ### HEIC
 
@@ -289,8 +299,9 @@ Use an HDR-capable display and HDR-aware software. If an app does not recognise 
 
 ## Limitations
 
-- This tool does not reproduce Panasonic’s proprietary JPEG engine, Lightroom, or macOS Preview exactly.
-- LibRaw rendering can differ in white balance, colour response, noise reduction, demosaicing, and tone mapping.
+- This tool does not reproduce Panasonic’s or Olympus’s proprietary JPEG engines, Lightroom, macOS Preview, or Olympus Workspace exactly.
+- LibRaw rendering can differ in white balance, colour response, noise reduction, demosaicing, lens corrections, and tone mapping.
+- RAW formats currently supported are Panasonic RW2 and Olympus / OM System ORF. Support depends on the installed LibRaw/rawpy version and the individual camera model.
 - Social-media platforms may recompress, strip HDR metadata, or convert uploads to SDR.
 - HEIC encoding availability depends on the locally installed `libheif` build and its HEVC encoder plugin.
 - JPEG XL support varies by operating system, browser, image viewer, and social platform.
@@ -324,23 +335,25 @@ brew install jpeg-xl
 sudo apt install libjxl-tools
 ```
 
-### The image looks too dark or too bright
+### The Image Looks Too Dark or Too Bright
 
-Adjust exposure, for some RAW images taken with V-log profile, it might be severely underexposed, to counteract:
+Adjust exposure. Some RAW images taken with the V-Log photo style may initially appear severely underexposed in this independent LibRaw-based development pipeline. To compensate:
 
 ```bash
 python LUMIX2HLG.py P1000000.RW2 --exposure +4.0
 ```
 
-For bright HDR scenes, begin around:
+For bright HDR scenes, start around:
 
 ```bash
 --exposure -0.5 --rolloff 0.25
 ```
 
-### The image looks different from Preview or Lightroom
+### The Image Looks Different From Preview, Lightroom, or Olympus Workspace
 
-This is expected for RAW input. The app uses LibRaw rather than Panasonic’s or Adobe’s proprietary RAW-rendering pipeline. Start by reducing or disabling roll-off:
+This is expected for RAW input. The tool uses LibRaw rather than Panasonic’s, Olympus’s, Adobe’s, or Apple’s proprietary RAW-rendering pipeline.
+
+First, try reducing or disabling roll-off:
 
 ```bash
 python LUMIX2HLG.py P1000000.RW2 --rolloff 0
@@ -350,5 +363,4 @@ Then adjust exposure, contrast, and saturation as needed.
 
 ## License
 
-GNU General Public License v3.0
-
+[GNU General Public License v3.0](LICENSE)
