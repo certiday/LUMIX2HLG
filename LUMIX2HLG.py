@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 """
-Lumix RAW / V-Log still to BT.2100 HLG converter.
+Lumix / Olympus RAW and V-Log still to BT.2100 HLG converter.
 
-Inputs:
-- Panasonic RW2 RAW files
-- V-Log / V-Gamut rendered JPEG, PNG, TIFF
+Supported inputs:
+  - Panasonic Lumix RW2 RAW files
+  - Olympus / OM System ORF RAW files
+  - Panasonic V-Log / V-Gamut rendered JPEG, PNG, TIFF
 
 Outputs:
-- TIFF: 16-bit HLG / BT.2020 HDR master
-- JXL:  16-bit HLG / BT.2020 JPEG XL
-- HEIC: 10-bit HLG / BT.2020 HEIC
-
-External tools:
-- TIFF: none
-- JXL:  cjxl (optional; install libjxl tools)
-- HEIC: heif-enc (optional; install libheif)
+  - HEIC: BT.2020 + BT.2100 HLG metadata
+  - JPEG XL: BT.2020 + BT.2100 HLG colour encoding
+  - both: creates HEIC and JPEG XL for each input
 
 Examples:
-    python LUMIX2HLG.py P1000000.RW2
-    python LUMIX2HLG.py P1000000.RW2 --format jxl
-    python LUMIX2HLG.py P1000000.jpg --format heic
-    python LUMIX2HLG.py *.RW2 --format jxl --output-dir HLG_exports
+  python LUMIX2HLG.py DEMO.RW2 --format both
+  python LUMIX2HLG.py OM1_0001.ORF --format jxl
+  python LUMIX2HLG.py VLOG_0001.jpg --format heic
+  python LUMIX2HLG.py *.RW2 *.ORF --format both
+  python LUMIX2HLG.py "/path/to/photos" --format both
 """
 
 from __future__ import annotations
@@ -38,22 +35,25 @@ import tifffile
 from PIL import Image, ImageOps
 
 
-SUPPORTED_EXTENSIONS = {
+# RAW formats use the rawpy/LibRaw development path.
+RAW_EXTENSIONS = {
+    ".rw2",
+    ".orf",
+}
+
+# These inputs are assumed to be already V-Log / V-Gamut rendered images.
+VLOG_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".png",
     ".tif",
     ".tiff",
-    ".rw2",
 }
 
-OUTPUT_EXTENSIONS = {
-    "tiff": ".tif",
-    "jxl": ".jxl",
-    "heic": ".heic",
-}
+SUPPORTED_INPUTS = RAW_EXTENSIONS | VLOG_EXTENSIONS
 
 # Panasonic V-Gamut linear RGB -> CIE 1931 XYZ, D65.
+# Source: Panasonic V-Log / V-Gamut Reference Manual.
 V_GAMUT_TO_XYZ = np.array(
     [
         [0.679644, 0.152211, 0.118600],
@@ -75,12 +75,12 @@ XYZ_TO_BT2020 = np.array(
 
 
 def apply_matrix(matrix: np.ndarray, image: np.ndarray) -> np.ndarray:
-    """Apply a 3x3 colour transform to an H x W x 3 RGB image."""
+    """Apply a 3x3 colour matrix to an H x W x 3 RGB image."""
     return np.einsum("ij,...j->...i", matrix, image)
 
 
 def vlog_to_linear(vlog: np.ndarray) -> np.ndarray:
-    """Decode normalized Panasonic V-Log RGB values into scene-linear light."""
+    """Decode normalized Panasonic V-Log RGB values into scene-linear RGB."""
     vlog = np.asarray(vlog, dtype=np.float64)
 
     return np.where(
@@ -91,7 +91,7 @@ def vlog_to_linear(vlog: np.ndarray) -> np.ndarray:
 
 
 def linear_to_hlg(linear: np.ndarray) -> np.ndarray:
-    """Encode scene-linear RGB with the BT.2100 HLG OETF."""
+    """Encode scene-linear RGB using the BT.2100 HLG OETF."""
     linear = np.maximum(linear, 0.0)
 
     a = 0.17883277
@@ -99,7 +99,7 @@ def linear_to_hlg(linear: np.ndarray) -> np.ndarray:
     c = 0.55991073
 
     return np.where(
-        linear <= 1.0 / 12.0,
+        linear <= (1.0 / 12.0),
         np.sqrt(3.0 * linear),
         a * np.log(12.0 * linear - b) + c,
     )
@@ -107,7 +107,10 @@ def linear_to_hlg(linear: np.ndarray) -> np.ndarray:
 
 def load_vlog_image(path: Path) -> np.ndarray:
     """
-    Load a V-Log/V-Gamut rendered JPEG, PNG, or TIFF as normalized RGB.
+    Load a V-Log/V-Gamut JPEG, PNG, or TIFF as normalized RGB.
+
+    This function does not inspect or transform embedded ICC metadata. It
+    assumes input RGB values are already Panasonic V-Log / V-Gamut values.
     """
     suffix = path.suffix.lower()
 
@@ -115,7 +118,7 @@ def load_vlog_image(path: Path) -> np.ndarray:
         image = tifffile.imread(path)
 
         if image.ndim != 3 or image.shape[-1] < 3:
-            raise ValueError("Input TIFF must be an RGB image.")
+            raise ValueError("Input TIFF must be a three-channel RGB image.")
 
         image = image[..., :3]
 
@@ -137,12 +140,16 @@ def load_vlog_image(path: Path) -> np.ndarray:
     return image.astype(np.float64) / 255.0
 
 
-def load_rw2_as_linear_xyz(path: Path) -> np.ndarray:
+def load_raw_as_linear_xyz(path: Path) -> np.ndarray:
     """
-    Demosaic RW2 using LibRaw/rawpy and output scene-linear CIE XYZ.
+    Demosaic RW2 or ORF sensor RAW data with rawpy/LibRaw.
 
-    This is intentionally separate from V-Log: sensor RAW does not contain
-    V-Log-encoded RGB values.
+    - Uses as-shot camera white balance
+    - Disables automatic brightness
+    - Requests linear gamma
+    - Returns 16-bit CIE XYZ output normalized to 0-1
+
+    RAW files are not V-Log; they must follow this independent RAW pipeline.
     """
     with rawpy.imread(str(path)) as raw:
         xyz_u16 = raw.postprocess(
@@ -163,9 +170,15 @@ def apply_scene_adjustments(
     exposure_stops: float,
     highlight_rolloff: float,
 ) -> np.ndarray:
-    """Apply exposure and optional highlight compression in linear light."""
-    linear_bt2020 = linear_bt2020 * (2.0 ** exposure_stops)
-    linear_bt2020 = np.maximum(linear_bt2020, 0.0)
+    """
+    Apply exposure and optional highlight compression in scene-linear light.
+
+    Rolloff is 0-1. A value of 0 disables highlight compression.
+    """
+    linear_bt2020 = np.maximum(
+        linear_bt2020 * (2.0 ** exposure_stops),
+        0.0,
+    )
 
     if highlight_rolloff > 0.0:
         knee = 1.0 + (1.0 - highlight_rolloff) * 3.0
@@ -181,9 +194,10 @@ def apply_display_adjustments(
     contrast: float,
     saturation: float,
 ) -> np.ndarray:
-    """Apply creative adjustments after HLG transfer encoding."""
+    """Apply restrained creative controls after HLG encoding."""
     hlg_bt2020 = np.clip(hlg_bt2020, 0.0, 1.0)
 
+    # ITU-R BT.2020 luma coefficients.
     luma = (
         hlg_bt2020[..., 0] * 0.2627
         + hlg_bt2020[..., 1] * 0.6780
@@ -203,7 +217,7 @@ def convert_vlog_to_hlg(
     saturation: float,
     highlight_rolloff: float,
 ) -> np.ndarray:
-    """V-Log/V-Gamut RGB -> BT.2100 HLG / BT.2020 RGB."""
+    """Convert V-Log/V-Gamut image pixels into BT.2100 HLG / BT.2020."""
     linear_vgamut = vlog_to_linear(vlog_vgamut)
     linear_xyz = apply_matrix(V_GAMUT_TO_XYZ, linear_vgamut)
     linear_bt2020 = apply_matrix(XYZ_TO_BT2020, linear_xyz)
@@ -214,21 +228,23 @@ def convert_vlog_to_hlg(
         highlight_rolloff,
     )
 
+    hlg_bt2020 = linear_to_hlg(linear_bt2020)
+
     return apply_display_adjustments(
-        linear_to_hlg(linear_bt2020),
+        hlg_bt2020,
         contrast,
         saturation,
     )
 
 
-def convert_rw2_to_hlg(
+def convert_raw_to_hlg(
     linear_xyz: np.ndarray,
     exposure_stops: float,
     contrast: float,
     saturation: float,
     highlight_rolloff: float,
 ) -> np.ndarray:
-    """Linear XYZ from RW2 -> BT.2100 HLG / BT.2020 RGB."""
+    """Convert linear CIE XYZ from RW2/ORF into BT.2100 HLG / BT.2020."""
     linear_bt2020 = apply_matrix(XYZ_TO_BT2020, linear_xyz)
 
     linear_bt2020 = apply_scene_adjustments(
@@ -237,90 +253,44 @@ def convert_rw2_to_hlg(
         highlight_rolloff,
     )
 
+    hlg_bt2020 = linear_to_hlg(linear_bt2020)
+
     return apply_display_adjustments(
-        linear_to_hlg(linear_bt2020),
+        hlg_bt2020,
         contrast,
         saturation,
     )
 
 
-def as_u16(hlg_bt2020: np.ndarray) -> np.ndarray:
-    """Convert normalized HLG RGB to a 16-bit RGB array."""
+def hlg_to_u16(hlg_bt2020: np.ndarray) -> np.ndarray:
+    """Convert normalized HLG RGB pixels to unsigned 16-bit RGB."""
     return np.round(
         np.clip(hlg_bt2020, 0.0, 1.0) * 65535.0
     ).astype(np.uint16)
 
 
-def write_tiff(output_path: Path, hlg_bt2020: np.ndarray) -> None:
-    """Write a 16-bit BT.2020 / HLG TIFF master."""
-    tifffile.imwrite(
-        output_path,
-        as_u16(hlg_bt2020),
-        photometric="rgb",
-        metadata={
-            "Description": (
-                "BT.2020 primaries; BT.2100 HLG transfer; "
-                "16-bit RGB HDR master"
-            )
-        },
-    )
+def require_command(command: str, help_text: str) -> None:
+    """Require an external encoder to be present on PATH."""
+    if shutil.which(command) is None:
+        raise RuntimeError(
+            f"'{command}' was not found on PATH.\n\n{help_text}"
+        )
 
 
-def write_jxl(
-    output_path: Path,
+def write_temporary_tiff(
+    path: Path,
     hlg_bt2020: np.ndarray,
-    quality: int,
-    effort: int,
 ) -> None:
     """
-    Write a 16-bit BT.2020 / HLG JPEG XL.
+    Write a temporary 16-bit TIFF used only as HEIC encoder input.
 
-    cjxl receives a temporary 16-bit PPM file. `color_space` explicitly marks
-    the input as D65 / Rec.2020 / relative HLG.
+    It is created inside a temporary directory and automatically deleted.
     """
-    if shutil.which("cjxl") is None:
-        raise RuntimeError(
-            "cjxl was not found.\n"
-            "Install JPEG XL tools, then ensure cjxl is on PATH."
-        )
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        ppm_path = temp_dir / "hlg_rec2020.ppm"
-
-        image = as_u16(hlg_bt2020)
-        height, width, _ = image.shape
-
-        # Binary PPM supports 16-bit big-endian RGB pixels.
-        with open(ppm_path, "wb") as ppm:
-            ppm.write(f"P6\n{width} {height}\n65535\n".encode("ascii"))
-            ppm.write(image.astype(">u2", copy=False).tobytes())
-
-        command = [
-            "cjxl",
-            str(ppm_path),
-            str(output_path),
-            "--quality",
-            str(quality),
-            "--effort",
-            str(effort),
-            "-x",
-            "color_space=RGB_D65_202_Rel_HLG",
-        ]
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(
-                "JPEG XL encoding failed:\n"
-                f"{detail or 'No diagnostic returned by cjxl.'}"
-            )
+    tifffile.imwrite(
+        path,
+        hlg_to_u16(hlg_bt2020),
+        photometric="rgb",
+    )
 
 
 def write_heic(
@@ -329,34 +299,30 @@ def write_heic(
     quality: int,
 ) -> None:
     """
-    Write a 10-bit BT.2020 / HLG HEIC using libheif's heif-enc utility.
+    Encode 10-bit HEIC with BT.2020 / BT.2100 HLG colour metadata.
+
+    Requires heif-enc from libheif plus an HEVC encoding plugin.
     """
-    if shutil.which("heif-enc") is None:
-        raise RuntimeError(
-            "heif-enc was not found.\n"
-            "Install libheif with an HEVC encoder, then add it to PATH."
-        )
+    require_command(
+        "heif-enc",
+        "Install libheif with HEVC encoding support, then make sure "
+        "'heif-enc' is on PATH.",
+    )
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        tiff_path = temp_dir / "hlg_rec2020.tif"
-
-        tifffile.imwrite(
-            tiff_path,
-            as_u16(hlg_bt2020),
-            photometric="rgb",
-        )
+        source_tiff = Path(temp_dir) / "hlg_bt2020.tif"
+        write_temporary_tiff(source_tiff, hlg_bt2020)
 
         command = [
             "heif-enc",
-            str(tiff_path),
+            str(source_tiff),
             "-o",
             str(output_path),
 
-            # CICP / NCLX:
-            # 9  = BT.2020 primaries
-            # 18 = HLG (ARIB STD-B67)
-            # 9  = BT.2020 non-constant-luminance matrix
+            # CICP / NCLX signalling:
+            # 9  = BT.2020 colour primaries
+            # 18 = HLG / ARIB STD-B67 transfer characteristic
+            # 9  = BT.2020 non-constant-luminance matrix coefficients
             "--colour_primaries",
             "9",
             "--transfer_characteristic",
@@ -380,15 +346,72 @@ def write_heic(
         )
 
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
+            details = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(
                 "HEIC encoding failed:\n"
-                f"{detail or 'No diagnostic returned by heif-enc.'}"
+                f"{details or 'No diagnostic returned by heif-enc.'}"
             )
 
 
-def collect_input_files(items: list[str]) -> list[Path]:
-    """Accept files and top-level folders, remove duplicate paths."""
+def write_jxl(
+    output_path: Path,
+    hlg_bt2020: np.ndarray,
+    quality: int,
+    effort: int,
+) -> None:
+    """
+    Encode JPEG XL with explicit D65 / Rec.2020 / relative-HLG colour data.
+
+    Requires cjxl from libjxl. A temporary 16-bit PPM is used because it
+    preserves the 16-bit RGB samples supplied to cjxl.
+    """
+    require_command(
+        "cjxl",
+        "Install JPEG XL tools, then make sure 'cjxl' is on PATH.",
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        ppm_path = Path(temp_dir) / "hlg_bt2020.ppm"
+        image = hlg_to_u16(hlg_bt2020)
+        height, width, _ = image.shape
+
+        with ppm_path.open("wb") as ppm:
+            ppm.write(f"P6\n{width} {height}\n65535\n".encode("ascii"))
+            ppm.write(image.astype(">u2", copy=False).tobytes())
+
+        command = [
+            "cjxl",
+            str(ppm_path),
+            str(output_path),
+            "--quality",
+            str(quality),
+            "--effort",
+            str(effort),
+            "-x",
+            "color_space=RGB_D65_202_Rel_HLG",
+        ]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(
+                "JPEG XL encoding failed:\n"
+                f"{details or 'No diagnostic returned by cjxl.'}"
+            )
+
+
+def find_input_files(items: list[str]) -> list[Path]:
+    """
+    Get files passed directly, or supported files in a folder's top level.
+
+    Folder searching is deliberately non-recursive.
+    """
     candidates: list[Path] = []
 
     for item in items:
@@ -396,15 +419,20 @@ def collect_input_files(items: list[str]) -> list[Path]:
 
         if path.is_file():
             candidates.append(path)
+
         elif path.is_dir():
             candidates.extend(
-                file
-                for file in sorted(path.iterdir())
-                if file.is_file()
-                and file.suffix.lower() in SUPPORTED_EXTENSIONS
+                child
+                for child in sorted(path.iterdir())
+                if child.is_file()
+                and child.suffix.lower() in SUPPORTED_INPUTS
             )
+
         else:
-            print(f"Warning: not found, skipped: {path}", file=sys.stderr)
+            print(
+                f"Warning: path not found, skipped: {path}",
+                file=sys.stderr,
+            )
 
     unique: list[Path] = []
     seen: set[Path] = set()
@@ -421,27 +449,33 @@ def collect_input_files(items: list[str]) -> list[Path]:
 
 def make_output_path(
     input_path: Path,
-    output_dir: Path,
+    output_directory: Path,
     output_format: str,
 ) -> Path:
-    """Build the output filename without modifying input files."""
-    extension = OUTPUT_EXTENSIONS[output_format]
-    return output_dir / f"{input_path.stem}_BT2100_HLG{extension}"
+    """Return a non-destructive output filename for HEIC or JPEG XL."""
+    extension = ".heic" if output_format == "heic" else ".jxl"
+
+    return output_directory / (
+        f"{input_path.stem}_BT2100_HLG{extension}"
+    )
 
 
-def convert_one(input_path: Path, args: argparse.Namespace) -> Path:
-    """Load, convert, and encode one image."""
+def convert_one(
+    input_path: Path,
+    args: argparse.Namespace,
+) -> list[Path]:
+    """Convert one input photo and return its created output file paths."""
     suffix = input_path.suffix.lower()
 
-    if suffix not in SUPPORTED_EXTENSIONS:
+    if suffix not in SUPPORTED_INPUTS:
         raise ValueError(f"Unsupported input type: {suffix}")
 
     print(f"Processing: {input_path.name}")
 
-    if suffix == ".rw2":
-        linear_xyz = load_rw2_as_linear_xyz(input_path)
+    if suffix in RAW_EXTENSIONS:
+        linear_xyz = load_raw_as_linear_xyz(input_path)
 
-        hlg_bt2020 = convert_rw2_to_hlg(
+        hlg_bt2020 = convert_raw_to_hlg(
             linear_xyz,
             args.exposure,
             args.contrast,
@@ -459,42 +493,51 @@ def convert_one(input_path: Path, args: argparse.Namespace) -> Path:
             args.rolloff,
         )
 
-    output_path = make_output_path(
-        input_path,
-        args.output_dir,
-        args.format,
+    requested_formats = (
+        ("heic", "jxl")
+        if args.format == "both"
+        else (args.format,)
     )
 
-    if output_path.exists() and not args.overwrite:
-        raise FileExistsError(
-            f"Output already exists: {output_path}\n"
-            "Use --overwrite to replace it."
+    outputs: list[Path] = []
+
+    for output_format in requested_formats:
+        output_path = make_output_path(
+            input_path,
+            args.output_dir,
+            output_format,
         )
 
-    if args.format == "tiff":
-        write_tiff(output_path, hlg_bt2020)
-    elif args.format == "jxl":
-        write_jxl(
-            output_path,
-            hlg_bt2020,
-            args.quality,
-            args.effort,
-        )
-    else:
-        write_heic(
-            output_path,
-            hlg_bt2020,
-            args.quality,
-        )
+        if output_path.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"Output already exists: {output_path}\n"
+                "Use --overwrite to replace it."
+            )
 
-    return output_path
+        if output_format == "heic":
+            write_heic(
+                output_path,
+                hlg_bt2020,
+                args.quality,
+            )
+        else:
+            write_jxl(
+                output_path,
+                hlg_bt2020,
+                args.quality,
+                args.effort,
+            )
+
+        outputs.append(output_path)
+
+    return outputs
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert Lumix RW2 RAW or V-Log/V-Gamut stills to "
-            "BT.2100 HLG / BT.2020 TIFF, JPEG XL, or HEIC."
+            "Convert Lumix RW2, Olympus/OM System ORF, or V-Log/V-Gamut "
+            "stills to BT.2100 HLG / BT.2020 HEIC and JPEG XL."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -502,13 +545,13 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "inputs",
         nargs="+",
-        help="One or more source files and/or folders.",
+        help="Source photo file(s) and/or folder(s).",
     )
 
     parser.add_argument(
         "--format",
-        choices=("tiff", "jxl", "heic"),
-        default="tiff",
+        choices=("heic", "jxl", "both"),
+        default="both",
         help="Output format.",
     )
 
@@ -516,7 +559,21 @@ def parse_arguments() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("HLG_exports"),
-        help="Directory for converted files.",
+        help="Folder for converted files.",
+    )
+
+    parser.add_argument(
+        "--quality",
+        type=int,
+        default=92,
+        help="HEIC/JPEG XL quality from 1 to 100.",
+    )
+
+    parser.add_argument(
+        "--effort",
+        type=int,
+        default=7,
+        help="JPEG XL effort from 1 to 10.",
     )
 
     parser.add_argument(
@@ -548,74 +605,65 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--quality",
-        type=int,
-        default=92,
-        help="HEIC/JXL quality from 1 to 100; ignored for TIFF.",
-    )
-
-    parser.add_argument(
-        "--effort",
-        type=int,
-        default=7,
-        help="JPEG XL encoder effort from 1 to 10; ignored for TIFF/HEIC.",
-    )
-
-    parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace output files with matching names.",
+        help="Replace matching output files.",
     )
 
     args = parser.parse_args()
 
     args.output_dir = args.output_dir.expanduser()
+    args.quality = max(1, min(100, args.quality))
+    args.effort = max(1, min(10, args.effort))
     args.exposure = max(-5.0, min(5.0, args.exposure))
     args.contrast = max(0.5, min(1.5, args.contrast))
     args.saturation = max(0.0, min(2.0, args.saturation))
     args.rolloff = max(0.0, min(1.0, args.rolloff))
-    args.quality = max(1, min(100, args.quality))
-    args.effort = max(1, min(10, args.effort))
 
     return args
 
 
 def main() -> int:
     args = parse_arguments()
-    input_files = collect_input_files(args.inputs)
+    input_files = find_input_files(args.inputs)
 
     if not input_files:
+        extensions = ", ".join(sorted(SUPPORTED_INPUTS))
         print(
-            "No supported source files found. Supported types: "
-            + ", ".join(sorted(SUPPORTED_EXTENSIONS)),
+            f"No supported input files found. Supported types: {extensions}",
             file=sys.stderr,
         )
         return 1
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    successful = 0
-    failed: list[tuple[str, str]] = []
+    successes = 0
+    failures: list[tuple[str, str]] = []
 
     for input_path in input_files:
         try:
-            output = convert_one(input_path, args)
-            print(f"  Created: {output}")
-            successful += 1
+            outputs = convert_one(input_path, args)
+
+            for output in outputs:
+                print(f"  Created: {output}")
+
+            successes += 1
+
         except Exception as error:
-            failed.append((input_path.name, str(error)))
+            failures.append((input_path.name, str(error)))
             print(
-                f"  Failed: {input_path.name}\n"
-                f"  {error}",
+                f"  Failed: {input_path.name}\n  {error}",
                 file=sys.stderr,
             )
 
-    print(f"\nFinished: {successful}/{len(input_files)} converted.")
+    print(f"\nFinished: {successes}/{len(input_files)} input file(s) converted.")
 
-    if failed:
+    if failures:
         print("\nFailures:", file=sys.stderr)
-        for filename, message in failed:
-            print(f"- {filename}: {message}", file=sys.stderr)
+
+        for filename, reason in failures:
+            print(f"- {filename}: {reason}", file=sys.stderr)
+
         return 1
 
     return 0
